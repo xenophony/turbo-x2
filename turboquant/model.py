@@ -314,15 +314,17 @@ def save_quantized_model(model: nn.Module, output_dir: str, tokenizer=None):
 def load_quantized_model(
     model_dir: str,
     device: Optional[str] = None,
-    original_model_id: Optional[str] = None,
 ) -> nn.Module:
     """Load a quantized model from disk.
+
+    Only needs the quantized model directory — does NOT download the
+    original full-precision model. Creates the architecture from config,
+    replaces quantized layers with TQ modules, and loads all weights
+    from the saved safetensors file.
 
     Args:
         model_dir: directory containing model.safetensors and turboquant_config.json
         device: target device (None = auto)
-        original_model_id: if provided, load the base model from this ID
-            (ensures proper initialization); otherwise reconstruct from config.
 
     Returns:
         The loaded model with TurboQuantLinear layers
@@ -339,21 +341,13 @@ def load_quantized_model(
     with open(model_path / "turboquant_config.json") as f:
         tq_config = json.load(f)
 
-    # Load the base model architecture with proper initialization
+    # Create model architecture from config with proper initialization
+    # (rotary embeddings, layernorm init, etc. — no weight download)
     config = AutoConfig.from_pretrained(model_dir)
-    if original_model_id:
-        model = AutoModelForCausalLM.from_pretrained(
-            original_model_id, dtype=torch.bfloat16, device_map="cpu",
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir, dtype=torch.bfloat16, device_map="cpu",
-            # Load non-quantized weights only; ignore missing TQ buffers
-        )
+    model = AutoModelForCausalLM.from_config(config).to(dtype=torch.bfloat16)
 
     # Replace quantized layers with TQ modules
-    # First pass: embeddings and linear layers
-    emb_modules = {}  # name -> TurboQuantEmbedding (for tied lm_head)
+    emb_modules = {}
     for name, layer_cfg in tq_config.items():
         ltype = layer_cfg.get("type", "linear")
 
@@ -395,16 +389,18 @@ def load_quantized_model(
             if emb is not None:
                 _set_module(model, name, _make_tq_linear_from_embedding(emb))
 
-    # Load quantized weights from our safetensors file
+    # Load ALL weights from our safetensors file (TQ buffers + layernorms + etc.)
     state_dict = load_file(model_path / "model.safetensors")
-    # Only load TQ-specific keys (codebook, indices_packed, weight_norms, bias)
-    tq_keys = {}
-    for k, v in state_dict.items():
-        for tq_name in tq_config:
-            if k.startswith(tq_name + "."):
-                tq_keys[k] = v
-                break
-    model.load_state_dict(tq_keys, strict=False)
+    model.load_state_dict(state_dict, strict=False)
+
+    # Restore tied weights: safetensors deduplicates and saves only lm_head.weight,
+    # so embed_tokens.weight is all zeros after load. Copy lm_head → embed_tokens,
+    # then tie them properly.
+    if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+        if (hasattr(model, "lm_head") and hasattr(model, "model")
+                and hasattr(model.model, "embed_tokens")
+                and isinstance(model.model.embed_tokens, nn.Embedding)):
+            model.model.embed_tokens.weight = model.lm_head.weight
 
     model = model.to(device)
     return model

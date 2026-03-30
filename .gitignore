@@ -8,3 +8,4 @@ quantized/
 *.bin
 *.safetensors
 .claude/
+.env
