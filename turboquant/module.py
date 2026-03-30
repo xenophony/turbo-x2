@@ -136,20 +136,14 @@ class TurboQuantLinear(nn.Module):
         return self._rotation_cache[key]
 
     def _get_indices(self) -> torch.Tensor:
-        """Get unpacked indices (cached), dispatching on bit_width."""
-        if self._cached_indices is None:
-            self._cached_indices = unpack_bits(
-                self.indices_packed, self.in_features, self.bit_width
-            )
-        return self._cached_indices
+        """Get unpacked indices (on-the-fly, no caching to save GPU memory)."""
+        return unpack_bits(self.indices_packed, self.in_features, self.bit_width)
 
     def _get_pass2_indices(self) -> torch.Tensor:
-        if self._cached_pass2_indices is None and self.pass2_indices_packed is not None:
+        if self.pass2_indices_packed is not None:
             bw = self._pass2_bit_width or self.bit_width
-            self._cached_pass2_indices = unpack_bits(
-                self.pass2_indices_packed, self.in_features, bw
-            )
-        return self._cached_pass2_indices
+            return unpack_bits(self.pass2_indices_packed, self.in_features, bw)
+        return None
 
     def _forward_pass(
         self,

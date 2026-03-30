@@ -38,17 +38,12 @@ def generate_rotation_matrix(d: int, seed: int = 42, device: str = "cpu") -> tor
     # then move to target device for fast QR
     gen = torch.Generator().manual_seed(seed)
     G = torch.randn(d, d, generator=gen)
-    if device != "cpu":
-        try:
-            G = G.to(device)
-            Q, R = torch.linalg.qr(G)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            G = G.cpu()
-            Q, R = torch.linalg.qr(G)
-    else:
-        Q, R = torch.linalg.qr(G)
-    # Fix sign ambiguity to get proper Haar distribution
+    # For large matrices, always use CPU to avoid GPU OOM.
+    # GPU QR on a 13824x13824 matrix needs ~2GB of temporary space.
+    large = (d > 8192)
+    if device != "cpu" and not large:
+        G = G.to(device)
+    Q, R = torch.linalg.qr(G)
     diag_sign = torch.sign(torch.diag(R))
     Q = Q * diag_sign.unsqueeze(0)
     return Q
