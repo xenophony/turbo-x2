@@ -551,8 +551,8 @@ class TurboQuantEmbedding(nn.Module):
 
             result[:, g_start:g_end] = W_g
 
-        # Reshape to match input
-        return result.reshape(*orig_shape, D).to(self.codebook.dtype)
+        # Reshape to match input, return bf16 to match model dtype
+        return result.reshape(*orig_shape, D).to(torch.bfloat16)
 
     def memory_bytes(self) -> int:
         total = self.indices_packed.numel()

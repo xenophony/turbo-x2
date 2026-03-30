@@ -429,14 +429,24 @@ def load_quantized_model(
     state_dict = load_file(model_path / "model.safetensors")
     model.load_state_dict(state_dict, strict=False)
 
-    # Restore tied weights: safetensors deduplicates and saves only lm_head.weight,
-    # so embed_tokens.weight is all zeros after load. Copy lm_head → embed_tokens,
-    # then tie them properly.
-    if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
-        if (hasattr(model, "lm_head") and hasattr(model, "model")
-                and hasattr(model.model, "embed_tokens")
-                and isinstance(model.model.embed_tokens, nn.Embedding)):
-            model.model.embed_tokens.weight = model.lm_head.weight
+    # Restore tied/shared weights after load.
+    # safetensors deduplicates shared buffers: when lm_head and embed_tokens share
+    # the same packed data, only one copy is saved. Re-share after loading.
+    if hasattr(model, "lm_head") and hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+        lm = model.lm_head
+        emb = model.model.embed_tokens
+        if isinstance(lm, TurboQuantLinear) and isinstance(emb, TurboQuantEmbedding):
+            # lm_head got the data, embedding is empty — share buffers
+            emb.indices_packed = lm.indices_packed
+            emb.codebook = lm.codebook
+            emb.weight_norms = lm.weight_norms
+        elif isinstance(emb, TurboQuantEmbedding) and isinstance(lm, nn.Linear):
+            # lm_head wasn't quantized but embedding was — shouldn't happen, but handle it
+            pass
+        elif isinstance(emb, nn.Embedding) and isinstance(lm, nn.Linear):
+            # Neither quantized — restore standard weight tying
+            if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+                emb.weight = lm.weight
 
     model = model.to(device)
     return model
