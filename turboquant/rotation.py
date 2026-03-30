@@ -39,7 +39,10 @@ def generate_rotation_matrix(d: int, seed: int = 42, device: str = "cpu") -> tor
     gen = torch.Generator().manual_seed(seed)
     G = torch.randn(d, d, generator=gen)
     if device != "cpu":
-        G = G.to(device)
+        try:
+            G = G.to(device)
+        except torch.cuda.OutOfMemoryError:
+            pass  # fall back to CPU QR
     Q, R = torch.linalg.qr(G)
     # Fix sign ambiguity to get proper Haar distribution
     diag_sign = torch.sign(torch.diag(R))
