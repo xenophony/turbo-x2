@@ -126,10 +126,13 @@ class TurboQuantLinear(nn.Module):
         d = dim or self.group_size
         key = (seed + g_start, d)
         if key not in self._rotation_cache:
+            # Try GPU first, fall back to CPU for large matrices
             target_device = str(self.indices_packed.device)
-            self._rotation_cache[key] = generate_rotation_matrix(
-                d, seed=seed + g_start, device=target_device
-            )
+            Q = generate_rotation_matrix(d, seed=seed + g_start, device=target_device)
+            # Keep large rotation matrices on CPU to save GPU memory
+            if Q.device.type != "cpu" and Q.numel() > 10_000_000:  # >10M elements ~40MB
+                Q = Q.cpu()
+            self._rotation_cache[key] = Q
         return self._rotation_cache[key]
 
     def _get_indices(self) -> torch.Tensor:
