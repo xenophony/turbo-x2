@@ -18,7 +18,7 @@ import torch
 # ---------------------------------------------------------------------------
 
 
-def generate_rotation_matrix(d: int, seed: int = 42) -> torch.Tensor:
+def generate_rotation_matrix(d: int, seed: int = 42, device: str = "cpu") -> torch.Tensor:
     """Generate a Haar-distributed random orthogonal matrix via QR decomposition.
 
     The resulting matrix maps any unit vector to a nearly uniform point on
@@ -28,12 +28,18 @@ def generate_rotation_matrix(d: int, seed: int = 42) -> torch.Tensor:
     Args:
         d: dimension
         seed: random seed for reproducibility
+        device: device to compute on ("cpu" or "cuda"). Using GPU is much
+                faster for large dimensions (>1000).
 
     Returns:
         Q: orthogonal matrix of shape (d, d), float32
     """
+    # Generate random matrix on CPU for deterministic seeding,
+    # then move to target device for fast QR
     gen = torch.Generator().manual_seed(seed)
     G = torch.randn(d, d, generator=gen)
+    if device != "cpu":
+        G = G.to(device)
     Q, R = torch.linalg.qr(G)
     # Fix sign ambiguity to get proper Haar distribution
     diag_sign = torch.sign(torch.diag(R))

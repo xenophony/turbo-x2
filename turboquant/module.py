@@ -126,9 +126,10 @@ class TurboQuantLinear(nn.Module):
         d = dim or self.group_size
         key = (seed + g_start, d)
         if key not in self._rotation_cache:
+            target_device = str(self.indices_packed.device)
             self._rotation_cache[key] = generate_rotation_matrix(
-                d, seed=seed + g_start
-            ).to(self.indices_packed.device)
+                d, seed=seed + g_start, device=target_device
+            )
         return self._rotation_cache[key]
 
     def _get_indices(self) -> torch.Tensor:
@@ -376,7 +377,7 @@ class TurboQuantLinear(nn.Module):
                 all_norms.append(norms.squeeze(1))
 
                 Pi = generate_rotation_matrix(
-                    g_dim, seed=self._rotation_seed + g_start
+                    g_dim, seed=self._rotation_seed + g_start, device=str(device)
                 ).to(device)
                 Y = W_norm @ Pi.T
                 Y_scaled = Y * scale
@@ -500,9 +501,10 @@ class TurboQuantEmbedding(nn.Module):
     def _get_rotation(self, g_start: int, dim: int) -> torch.Tensor:
         key = (self._rotation_seed + g_start, dim)
         if key not in self._rotation_cache:
+            target_device = str(self.indices_packed.device)
             self._rotation_cache[key] = generate_rotation_matrix(
-                dim, seed=self._rotation_seed + g_start
-            ).to(self.indices_packed.device)
+                dim, seed=self._rotation_seed + g_start, device=target_device
+            )
         return self._rotation_cache[key]
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
