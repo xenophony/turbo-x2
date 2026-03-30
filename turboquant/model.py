@@ -131,7 +131,8 @@ def replace_linear_layers(
             for part in parts:
                 module = getattr(module, part)
 
-            tq_emb = _quantize_embedding(module, emb_bits, group_size, seed, rotation, device)
+            # Always quantize embeddings on CPU — they're too large for GPU intermediates
+            tq_emb = _quantize_embedding(module, emb_bits, group_size, seed, rotation, "cpu")
             _set_module(model, name, tq_emb)
             if device == "cuda":
                 torch.cuda.empty_cache()
