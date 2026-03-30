@@ -26,6 +26,14 @@ from turboquant.packing import pack_bits, unpack_bits
 from turboquant.codebook import get_codebook
 from turboquant.quantize import _resolve_rotation
 
+# Try to import Triton fused kernel
+_HAS_TRITON = False
+try:
+    from turboquant.triton_kernels import triton_fused_matmul
+    _HAS_TRITON = True
+except ImportError:
+    pass
+
 
 class TurboQuantLinear(nn.Module):
     """Linear layer with TurboQuant-compressed weights and on-the-fly dequantization."""
@@ -196,13 +204,25 @@ class TurboQuantLinear(nn.Module):
             else:
                 norms_g = weight_norms[:, g]
 
-            # PyTorch fallback: explicit unpack + lookup + matmul
-            if indices is None:
-                indices = unpack_bits(indices_packed, K, bit_width)
-            idx_g = indices[:, g_start:g_end]
-            W_g = codebook[idx_g.long()]
-            out_g = x_rot_g @ W_g.T
-            out_g = out_g * (norms_g[None, :] / scale)
+            # Triton fused kernel (fast) or PyTorch fallback (slow)
+            pack_factor = 8 // bit_width
+            packed_g_start = g_start // pack_factor
+            packed_g_end = math.ceil(g_end / pack_factor)
+            packed_g = indices_packed[:, packed_g_start:packed_g_end]
+
+            if _HAS_TRITON and x.device.type == "cuda":
+                out_g = triton_fused_matmul(
+                    x_rot_g.contiguous(), packed_g.contiguous(),
+                    codebook, norms_g.contiguous(), g_dim,
+                    scale=scale, bit_width=bit_width,
+                )
+            else:
+                if indices is None:
+                    indices = unpack_bits(indices_packed, K, bit_width)
+                idx_g = indices[:, g_start:g_end]
+                W_g = codebook[idx_g.long()]
+                out_g = x_rot_g @ W_g.T
+                out_g = out_g * (norms_g[None, :] / scale)
 
             output += out_g
 

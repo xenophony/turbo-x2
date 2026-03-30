@@ -39,7 +39,13 @@ def main():
     model.eval()
 
     print(f"Generating (device={device})...")
-    inputs = tokenizer(args.prompt, return_tensors="pt").to(device)
+    # Use chat template if available (important for instruction-tuned models)
+    if hasattr(tokenizer, "apply_chat_template"):
+        messages = [{"role": "user", "content": args.prompt}]
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(text, return_tensors="pt").to(device)
+    else:
+        inputs = tokenizer(args.prompt, return_tensors="pt").to(device)
 
     with torch.no_grad():
         output = model.generate(
@@ -47,6 +53,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             do_sample=args.temperature > 0,
+            repetition_penalty=1.2,
         )
 
     response = tokenizer.decode(output[0], skip_special_tokens=True)
