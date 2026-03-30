@@ -341,12 +341,14 @@ def load_quantized_model(
     with open(model_path / "turboquant_config.json") as f:
         tq_config = json.load(f)
 
-    # Create model architecture from config with proper initialization
-    # (rotary embeddings, layernorm init, etc. — no weight download)
+    # Create model on meta device (zero memory), replace quantized layers
+    # with TQ modules (on CPU), then materialize remaining meta tensors.
+    # This avoids allocating ~28GB of throwaway linear weights for 14B models.
     config = AutoConfig.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_config(config).to(dtype=torch.bfloat16)
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config)
 
-    # Replace quantized layers with TQ modules
+    # Replace quantized layers with TQ modules (created on CPU, not meta)
     emb_modules = {}
     for name, layer_cfg in tq_config.items():
         ltype = layer_cfg.get("type", "linear")
@@ -388,6 +390,40 @@ def load_quantized_model(
             emb = emb_modules.get(tied_to) or next(iter(emb_modules.values()), None)
             if emb is not None:
                 _set_module(model, name, _make_tq_linear_from_embedding(emb))
+
+    # Materialize any remaining meta modules on CPU.
+    # TQ modules are already on CPU; only non-quantized leftovers need conversion.
+    # Walk modules and convert any that still have meta tensors.
+    for name, module in list(model.named_modules()):
+        if isinstance(module, (TurboQuantLinear, TurboQuantEmbedding)):
+            continue  # already on CPU
+        has_meta = any(
+            (p.device == torch.device("meta"))
+            for p in list(module.parameters(recurse=False))
+        ) or any(
+            (b is not None and b.device == torch.device("meta"))
+            for b in list(module.buffers(recurse=False))
+        )
+        if has_meta:
+            # Recreate this module's tensors on CPU
+            for pname, param in list(module.named_parameters(recurse=False)):
+                if param.device == torch.device("meta"):
+                    new_param = nn.Parameter(
+                        torch.empty(param.shape, dtype=param.dtype, device="cpu"))
+                    module.register_parameter(pname, new_param)
+            for bname, buf in list(module.named_buffers(recurse=False)):
+                if buf is not None and buf.device == torch.device("meta"):
+                    module.register_buffer(bname, torch.empty(
+                        buf.shape, dtype=buf.dtype, device="cpu"))
+
+    # Recompute rotary embeddings (to_empty/meta zeros inv_freq)
+    for name, module in model.named_modules():
+        if hasattr(module, "rotary_emb"):
+            rotary_cls = type(module.rotary_emb)
+            try:
+                module.rotary_emb = rotary_cls(config=config, device="cpu")
+            except Exception:
+                pass  # not all models have the same rotary API
 
     # Load ALL weights from our safetensors file (TQ buffers + layernorms + etc.)
     state_dict = load_file(model_path / "model.safetensors")
