@@ -9,7 +9,7 @@ import argparse
 import torch
 from transformers import AutoTokenizer
 
-from turboquant.model import load_quantized_model
+from turboquant.model import load_quantized_model, decompress_model
 
 
 def main():
@@ -19,6 +19,8 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=200, help="Max tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
     parser.add_argument("--device", type=str, default=None, help="Device (default: auto)")
+    parser.add_argument("--decompress", action="store_true", default=False,
+                        help="Decompress to bf16 at load time for native inference speed")
     args = parser.parse_args()
 
     device = args.device
@@ -28,6 +30,8 @@ def main():
     print(f"Loading quantized model from {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = load_quantized_model(args.model, device=device)
+    if args.decompress:
+        decompress_model(model)
     model.eval()
 
     print(f"Generating (device={device})...")

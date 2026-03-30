@@ -450,3 +450,65 @@ def load_quantized_model(
 
     model = model.to(device)
     return model
+
+
+@torch.no_grad()
+def decompress_model(model: nn.Module) -> nn.Module:
+    """Decompress all TurboQuant layers back to standard nn.Linear / nn.Embedding.
+
+    Dequantizes all weights once at load time so inference runs at native speed.
+    Uses more VRAM than packed format but eliminates on-the-fly dequantization.
+
+    For 14B at 2-bit: ~4GB decompressed (bf16) vs ~2.3GB packed.
+    Still fits on a 3060 (12GB) with room for KV cache.
+
+    Args:
+        model: model with TurboQuantLinear / TurboQuantEmbedding layers
+
+    Returns:
+        The modified model with standard nn.Linear / nn.Embedding layers (in-place)
+    """
+    replacements = []
+    for name, module in model.named_modules():
+        if isinstance(module, TurboQuantLinear):
+            replacements.append((name, "linear", module))
+        elif isinstance(module, TurboQuantEmbedding):
+            replacements.append((name, "embedding", module))
+
+    print(f"Decompressing {len(replacements)} layers to bf16...")
+    for name, ltype, module in replacements:
+        if ltype == "linear":
+            W = module.dequantize()  # (out, in) bf16
+            has_bias = module.bias is not None
+            linear = nn.Linear(
+                module.in_features, module.out_features,
+                bias=has_bias, dtype=W.dtype, device=W.device,
+            )
+            linear.weight.data.copy_(W)
+            if has_bias:
+                linear.bias.data.copy_(module.bias)
+            _set_module(model, name, linear)
+        elif ltype == "embedding":
+            # Dequantize all embedding rows
+            all_ids = torch.arange(module.num_embeddings, device=module.indices_packed.device)
+            W = module(all_ids)  # (vocab, dim)
+            emb = nn.Embedding(
+                module.num_embeddings, module.embedding_dim,
+                padding_idx=module.padding_idx,
+                dtype=W.dtype, device=W.device,
+            )
+            emb.weight.data.copy_(W)
+            _set_module(model, name, emb)
+
+        # Free the packed data
+        del module
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Re-tie weights if needed
+    if (hasattr(model, "config") and getattr(model.config, "tie_word_embeddings", False)
+            and hasattr(model, "lm_head") and hasattr(model.model, "embed_tokens")):
+        model.lm_head.weight = model.model.embed_tokens.weight
+
+    print("Decompression complete.")
+    return model

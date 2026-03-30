@@ -262,7 +262,7 @@ class TurboQuantLinear(nn.Module):
                 Y_g = self.codebook[indices[:, g_start:g_end].long()] / scale
                 W_g = hadamard_rotate_inverse(Y_g, self._rotation_seed + g_start)
             else:
-                Pi_g = self._get_rotation(self._rotation_seed, g_start, dim=g_dim)
+                Pi_g = self._get_rotation(self._rotation_seed, g_start, dim=g_dim).to(W.device)
                 Y_g = self.codebook[indices[:, g_start:g_end].long()] / scale
                 W_g = Y_g @ Pi_g
 
@@ -285,7 +285,7 @@ class TurboQuantLinear(nn.Module):
                     Y_g = self.pass2_codebook[indices2[:, g_start:g_end].long()] / scale
                     W_g = hadamard_rotate_inverse(Y_g, self._pass2_seed + g_start)
                 else:
-                    Pi2_g = self._get_rotation(self._pass2_seed, g_start, dim=g_dim)
+                    Pi2_g = self._get_rotation(self._pass2_seed, g_start, dim=g_dim).to(W.device)
                     Y_g = self.pass2_codebook[indices2[:, g_start:g_end].long()] / scale
                     W_g = Y_g @ Pi2_g
                 if self.pass2_weight_norms.dim() == 1:
