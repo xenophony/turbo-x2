@@ -29,9 +29,13 @@ def main():
 
     print(f"Loading quantized model from {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = load_quantized_model(args.model, device=device)
     if args.decompress:
+        # Load on CPU, decompress, then move to target device
+        model = load_quantized_model(args.model, device="cpu")
         decompress_model(model)
+        model = model.to(device)
+    else:
+        model = load_quantized_model(args.model, device=device)
     model.eval()
 
     print(f"Generating (device={device})...")
