@@ -176,8 +176,8 @@ def turboquant_quantize_packed(
     full_indices = torch.cat(all_indices, dim=1)
     norms_out = torch.stack(all_norms, dim=1) if len(all_norms) > 1 else all_norms[0]
 
-    # Pad to multiple of pack_factor for packing
-    pack_factor = 8 // bit_width  # 4 for 2-bit, 2 for 4-bit
+    # Pad to multiple of pack unit for packing
+    pack_factor = 8 if bit_width == 3 else 8 // bit_width
     remainder = N % pack_factor
     if remainder != 0:
         pad_size = pack_factor - remainder

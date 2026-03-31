@@ -26,6 +26,16 @@ from turboquant.packing import pack_bits, unpack_bits
 from turboquant.codebook import get_codebook
 from turboquant.quantize import _resolve_rotation
 
+
+def _packed_dim(n_values: int, bit_width: int) -> int:
+    """Compute packed byte dimension for n_values at given bit_width."""
+    if bit_width == 3:
+        # 8 values per 3 bytes
+        return math.ceil(n_values / 8) * 3
+    else:
+        pack_factor = 8 // bit_width
+        return math.ceil(n_values / pack_factor)
+
 # Try to import fused kernels: CUDA C++ > Triton LUT > Triton > PyTorch fallback
 _HAS_CUDA_EXT = False
 _HAS_LUT = False
@@ -69,8 +79,7 @@ class TurboQuantLinear(nn.Module):
         self.n_levels = 2**bit_width
         self.rotation = rotation
 
-        pack_factor = 8 // bit_width
-        packed_dim = math.ceil(in_features / pack_factor)
+        packed_dim = _packed_dim(in_features, bit_width)
         n_groups = math.ceil(in_features / self.group_size)
 
         # Pass 1 buffers
@@ -218,9 +227,8 @@ class TurboQuantLinear(nn.Module):
                 norms_g = weight_norms[:, g]
 
             # LUT kernel (fastest) > Triton kernel > PyTorch fallback
-            pack_factor = 8 // bit_width
-            packed_g_start = g_start // pack_factor
-            packed_g_end = math.ceil(g_end / pack_factor)
+            packed_g_start = _packed_dim(g_start, bit_width)
+            packed_g_end = _packed_dim(g_end, bit_width)
             packed_g = indices_packed[:, packed_g_start:packed_g_end]
 
             if _HAS_LUT:
@@ -265,7 +273,7 @@ class TurboQuantLinear(nn.Module):
 
         # Fast path: fused CUDA C++ extension (one call per layer, no Python loop)
         use_hadamard = _resolve_rotation(self.rotation, self.group_size) == "hadamard"
-        if _HAS_CUDA_EXT and x.device.type == "cuda" and use_hadamard:
+        if _HAS_CUDA_EXT and x.device.type == "cuda" and use_hadamard and self.bit_width in (2, 4):
             signs = self._ensure_signs()
             output = _cuda_forward(
                 x, self.indices_packed, self.codebook, self.weight_norms,
@@ -458,10 +466,13 @@ class TurboQuantLinear(nn.Module):
             )
 
         # Pad and pack using generic dispatcher
-        pack_factor = 8 // self.bit_width
-        remainder = K % pack_factor
+        if self.bit_width == 3:
+            pack_unit = 8  # 8 values per 3 bytes
+        else:
+            pack_unit = 8 // self.bit_width
+        remainder = K % pack_unit
         if remainder != 0:
-            pad_size = pack_factor - remainder
+            pad_size = pack_unit - remainder
             full_indices = torch.nn.functional.pad(full_indices, (0, pad_size), value=0)
 
         packed = pack_bits(full_indices, self.bit_width)
@@ -530,8 +541,7 @@ class TurboQuantEmbedding(nn.Module):
         self.rotation = rotation
         self.padding_idx = padding_idx
 
-        pack_factor = 8 // bit_width
-        packed_dim = math.ceil(embedding_dim / pack_factor)
+        packed_dim = _packed_dim(embedding_dim, bit_width)
         n_groups = math.ceil(embedding_dim / self.group_size)
 
         self.register_buffer(
