@@ -26,9 +26,16 @@ from turboquant.packing import pack_bits, unpack_bits
 from turboquant.codebook import get_codebook
 from turboquant.quantize import _resolve_rotation
 
-# Try to import fused kernels (LUT preferred > Triton > PyTorch fallback)
+# Try to import fused kernels: CUDA C++ > Triton LUT > Triton > PyTorch fallback
+_HAS_CUDA_EXT = False
 _HAS_LUT = False
 _HAS_TRITON = False
+try:
+    from turboquant.cuda_ext import turboquant_forward as _cuda_forward, is_available as _cuda_available, precompute_signs
+    if _cuda_available():
+        _HAS_CUDA_EXT = True
+except Exception:
+    pass
 try:
     from turboquant.lut_kernels import lut_matmul
     _HAS_LUT = True
@@ -240,6 +247,15 @@ class TurboQuantLinear(nn.Module):
 
         return output
 
+    def _ensure_signs(self):
+        """Precompute hadamard sign vectors for the CUDA extension."""
+        if not hasattr(self, "_group_signs") or self._group_signs is None:
+            device = str(self.indices_packed.device)
+            self._group_signs = precompute_signs(
+                self._rotation_seed, self.group_size, self.in_features, device=device
+            )
+        return self._group_signs
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """On-the-fly dequant forward pass with group-wise rotation."""
         device = x.device
@@ -247,6 +263,25 @@ class TurboQuantLinear(nn.Module):
         if x.dim() == 3:
             x = x.reshape(-1, x.shape[-1])
 
+        # Fast path: fused CUDA C++ extension (one call per layer, no Python loop)
+        use_hadamard = _resolve_rotation(self.rotation, self.group_size) == "hadamard"
+        if _HAS_CUDA_EXT and x.device.type == "cuda" and use_hadamard:
+            signs = self._ensure_signs()
+            output = _cuda_forward(
+                x, self.indices_packed, self.codebook, self.weight_norms,
+                signs, self.group_size, self.bit_width, True,
+            )
+            if self.has_residual:
+                # TODO: support residual with CUDA ext
+                pass
+            if len(orig_shape) == 3:
+                output = output.reshape(orig_shape[0], orig_shape[1], self.out_features)
+            out = output.to(x.dtype)
+            if self.bias is not None:
+                out = out + self.bias.to(out.dtype)
+            return out
+
+        # Fallback: Python path
         x_f = x.float()
 
         # Pass 1
