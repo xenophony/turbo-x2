@@ -26,8 +26,14 @@ from turboquant.packing import pack_bits, unpack_bits
 from turboquant.codebook import get_codebook
 from turboquant.quantize import _resolve_rotation
 
-# Try to import Triton fused kernel
+# Try to import fused kernels (LUT preferred > Triton > PyTorch fallback)
+_HAS_LUT = False
 _HAS_TRITON = False
+try:
+    from turboquant.lut_kernels import lut_matmul
+    _HAS_LUT = True
+except ImportError:
+    pass
 try:
     from turboquant.triton_kernels import triton_fused_matmul
     _HAS_TRITON = True
@@ -204,13 +210,19 @@ class TurboQuantLinear(nn.Module):
             else:
                 norms_g = weight_norms[:, g]
 
-            # Triton fused kernel (fast) or PyTorch fallback (slow)
+            # LUT kernel (fastest) > Triton kernel > PyTorch fallback
             pack_factor = 8 // bit_width
             packed_g_start = g_start // pack_factor
             packed_g_end = math.ceil(g_end / pack_factor)
             packed_g = indices_packed[:, packed_g_start:packed_g_end]
 
-            if _HAS_TRITON and x.device.type == "cuda":
+            if _HAS_LUT:
+                out_g = lut_matmul(
+                    x_rot_g.contiguous(), packed_g.contiguous(),
+                    codebook, norms_g.contiguous(), g_dim,
+                    scale=scale, bit_width=bit_width,
+                )
+            elif _HAS_TRITON and x.device.type == "cuda":
                 out_g = triton_fused_matmul(
                     x_rot_g.contiguous(), packed_g.contiguous(),
                     codebook, norms_g.contiguous(), g_dim,
